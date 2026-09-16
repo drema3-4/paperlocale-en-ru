@@ -194,6 +194,57 @@ class TranslationContractTest(unittest.TestCase):
         target = "HDI-MSDI和SSP5-8.5"
         self.assertEqual(validate_translation(source, target), [])
 
+    def test_morphological_hyphen_is_not_part_of_abbreviation(self) -> None:
+        for abbreviation, suffix in (
+            ("OLS", "регрессия"), ("LLM", "модель"),
+            ("TVD", "показатель"), ("API", "интерфейс"),
+            ("OLS", "regression"), ("API", "接口"),
+            ("OLS", ""),
+        ):
+            with self.subTest(abbreviation=abbreviation, suffix=suffix):
+                self.assertEqual(
+                    protected_counts(f"{abbreviation}-{suffix}")["abbreviation"],
+                    {abbreviation: 1},
+                )
+
+    def test_ols_with_russian_morphological_hyphen_passes(self) -> None:
+        self.assertEqual(
+            validate_translation(
+                "OLS regression", "OLS-регрессия",
+                source_language="en", target_language="ru",
+            ),
+            [],
+        )
+
+    def test_ols_deletion_or_mutation_still_fails(self) -> None:
+        for target in ("регрессия", "OLZ-регрессия", "ols-регрессия"):
+            with self.subTest(target=target):
+                errors = validate_translation(
+                    "OLS regression", target,
+                    source_language="en", target_language="ru",
+                )
+                self.assertTrue(any("abbreviation" in e and "OLS" in e for e in errors))
+
+    def test_internal_hyphens_and_scientific_identifiers_remain_protected(self) -> None:
+        for token in ("HDI-MSDI", "SSP5-8", "NDVI", "CO2", "S1", "A-B"):
+            with self.subTest(token=token):
+                self.assertEqual(protected_counts(token)["abbreviation"], {token: 1})
+                target = f"Показатель {token}-модель"
+                self.assertEqual(
+                    validate_translation(token, target, target_language="ru"), [],
+                )
+                for changed in (token.replace("-", ""), token + "X"):
+                    if changed == token:
+                        continue
+                    errors = validate_translation(
+                        token, f"Показатель {changed}", target_language="ru",
+                    )
+                    self.assertTrue(any("abbreviation" in e for e in errors))
+        self.assertEqual(
+            protected_counts("HDI-\nMSDI SSP5-\n8.5")["abbreviation"],
+            {"HDI-MSDI": 1, "SSP5-8": 1},
+        )
+
     def test_pdf_word_fusion_before_abbreviation_is_ignored(self) -> None:
         """正文词与大写缩写粘连时，缩写身份仍按可见排版含义核对。"""
 

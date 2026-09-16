@@ -35,7 +35,8 @@ NUMBER_RE = re.compile(
     r"(?:(?<![\dA-Za-z])[-+−]?|(?<=[A-Za-z]))"
     r"\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?"
 )
-ABBREVIATION_RE = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z][A-Z0-9-]{1,})(?![A-Za-z0-9])")
+# Keep internal hyphens, but exclude trailing punctuation/morphological hyphens.
+ABBREVIATION_RE = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z][A-Z0-9-]*[A-Z0-9])(?![A-Za-z0-9])")
 # 真实论文常把章节名、出版元数据和图件标签排成全大写。它们是应翻译的
 # 普通英语词，而不是必须逐字保留的变量缩写。这里只列入批量运行中已经
 # 观察到的明确类别；NDVI、MOE、DH、CO 等科学标记仍继续走硬门禁。
