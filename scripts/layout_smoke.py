@@ -16,6 +16,7 @@ from reportlab.pdfgen import canvas
 
 from paperlocale.contracts import read_jsonl
 from paperlocale.domains import load_domain_pack
+from paperlocale.languages import language_identity
 from paperlocale.providers import (
     Segment,
     Translation,
@@ -46,14 +47,25 @@ class SmokeProvider(TranslationProvider):
             if segment.source == "Hello":
                 raise RuntimeError("不可见 Hello 片段不应进入版面冒烟 Provider")
             target = segment.source
-            for source, translated in (
+            pairs = (
                 ("Compound dry-hot events", "复合干热事件"),
                 ("Compound dry-hot event", "复合干热事件"),
                 ("soil moisture", "土壤湿度"),
                 ("Source scientific paper", "源科学论文"),
                 ("Column text", "栏文本"),
-            ):
+            )
+            if language_identity(context.target_language) == "ru":
+                pairs = (
+                    ("Compound dry-hot events", "Сочетанные сухие и жаркие явления"),
+                    ("Compound dry-hot event", "Сочетанное сухое и жаркое явление"),
+                    ("soil moisture", "влажность почвы"),
+                    ("Source scientific paper", "Исходная научная статья"),
+                    ("Column text", "Текст столбца"),
+                )
+            for source, translated in pairs:
                 target = target.replace(source, translated)
+            if target == segment.source and language_identity(context.target_language) == "ru":
+                raise ValueError(f"Unknown Russian smoke segment: {segment.source!r}")
             if target == segment.source:
                 # 未知的版面引擎探测片段仍保留原文，并加入中文以通过正文语言门禁。
                 target = f"{segment.source} 测试译文"
@@ -165,6 +177,7 @@ def build_synthetic_pdf(path: Path, figure_path: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("tmp/layout-smoke"))
+    parser.add_argument("--target-language", choices=("zh-CN", "ru", "ru-RU"), default="zh-CN")
     parser.add_argument("--pdf2zh-bin")
     parser.add_argument("--pdftoppm-bin")
     parser.add_argument(
@@ -188,12 +201,15 @@ def main() -> int:
     build_synthetic_pdf(source, figure)
 
     run_dir = root / "run"
-    domain = load_domain_pack("atmospheric-science")
+    domain = load_domain_pack(
+        Path(__file__).resolve().parents[1] / "tests/fixtures/en-ru"
+        if language_identity(args.target_language) == "ru" else "atmospheric-science"
+    )
     initial_manifest = initialize_run(
         source_pdf=source,
         run_dir=run_dir,
         source_language="en",
-        target_language="zh-CN",
+        target_language=args.target_language,
     )
     collect_run(run_dir, args.pdf2zh_bin)
     reference_review = prepare_reference_review_run(run_dir)

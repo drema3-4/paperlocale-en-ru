@@ -27,6 +27,7 @@ from fontTools.ttLib import TTFont
 from . import __version__
 from .contracts import read_jsonl, validate_translation_files
 from .domains import DomainPack
+from .languages import language_identity, normalize_language
 from .passthrough import (
     confirm_passthrough_map,
     load_passthrough_map,
@@ -156,7 +157,7 @@ def _verify_domain_languages(
 
     expected = (str(manifest["source_language"]), str(manifest["target_language"]))
     actual = (domain.source_language, domain.target_language)
-    if actual != expected:
+    if tuple(map(language_identity, actual)) != tuple(map(language_identity, expected)):
         raise ValueError(
             "领域包语言与运行不一致："
             f"run={expected[0]}->{expected[1]}, domain={actual[0]}->{actual[1]}"
@@ -669,8 +670,8 @@ def initialize_run(
         "status": "initialized",
         "source_pdf": str(source),
         "source_sha256": _sha256(source),
-        "source_language": source_language,
-        "target_language": target_language,
+        "source_language": normalize_language(source_language),
+        "target_language": normalize_language(target_language),
         "pages": pages,
         "segments_path": str(root / "segments.jsonl"),
         "translations_path": str(root / "translations.jsonl"),
@@ -723,7 +724,7 @@ def _common_layout_args(
         "--lang-in",
         str(manifest["source_language"]),
         "--lang-out",
-        str(manifest["target_language"]),
+        language_identity(str(manifest["target_language"])),
         "--output",
         str(output_dir),
         "--qps",

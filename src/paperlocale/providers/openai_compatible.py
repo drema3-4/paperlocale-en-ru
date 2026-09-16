@@ -13,6 +13,7 @@ from .base import (
     TranslationContext,
     TranslationProvider,
     build_prompt,
+    UNTRUSTED_DOCUMENT_INSTRUCTION,
     parse_payload,
 )
 
@@ -66,7 +67,10 @@ class OpenAICompatibleProvider(TranslationProvider):
     ) -> list[Translation]:
         body = {
             "model": self.model,
-            "messages": [{"role": "user", "content": build_prompt(segments, context)}],
+            "messages": [
+                {"role": "system", "content": UNTRUSTED_DOCUMENT_INSTRUCTION + " Return only the required JSON translation structure."},
+                {"role": "user", "content": build_prompt(segments, context)},
+            ],
             "temperature": 0,
         }
         request = urllib.request.Request(

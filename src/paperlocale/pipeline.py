@@ -106,7 +106,7 @@ def translate_segment_file(
         elif sid in reference_segment_ids and reference_policy == "preserve":
             errors = [] if target == source else ["preserve 策略要求参考文献原样保留"]
         elif sid in reference_segment_ids:
-            errors = validate_translation(source, target, None)
+            errors = validate_translation(source, target, None, source_language=domain.source_language, target_language=domain.target_language)
         else:
             errors = validate_translation(source, target, domain)
         if errors:
@@ -171,7 +171,7 @@ def translate_segment_file(
         rejected: list[dict[str, object]] = []
         for source_segment, result in zip(batch, translated):
             if source_segment.id in reference_segment_ids:
-                errors = validate_translation(source_segment.source, result.target, None)
+                errors = validate_translation(source_segment.source, result.target, None, source_language=domain.source_language, target_language=domain.target_language)
             else:
                 errors = validate_translation(source_segment.source, result.target, domain)
             if errors:
@@ -205,7 +205,7 @@ def translate_segment_file(
                 raise ValueError(
                     f"首轮内容校验失败，已禁用模型修复重试；详见 {rejected_path}。"
                     "若失败项是作者姓名等无需翻译内容，请核对源 PDF 后使用 "
-                    "confirm-passthrough，不要放宽正文中文门禁。"
+                    "confirm-passthrough，不要放宽正文目标语言门禁。"
                 )
             rejected_by_id = {str(row["id"]): row for row in rejected}
             repair_batch = [
@@ -229,7 +229,7 @@ def translate_segment_file(
             final_rejected: list[dict[str, object]] = []
             for source_segment, result in zip(repair_batch, repaired):
                 if source_segment.id in reference_segment_ids:
-                    errors = validate_translation(source_segment.source, result.target, None)
+                    errors = validate_translation(source_segment.source, result.target, None, source_language=domain.source_language, target_language=domain.target_language)
                 else:
                     errors = validate_translation(source_segment.source, result.target, domain)
                 if errors:

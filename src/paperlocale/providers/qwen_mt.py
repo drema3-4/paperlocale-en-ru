@@ -13,7 +13,8 @@ import urllib.request
 
 from ..contracts import ABBREVIATION_RE, NUMBER_RE, FORMULA_RE, STYLE_RE, protected_counts, source_term_is_present, validate_translation, scientific_quantities, scientific_literal_spans
 from ..quantities import standalone_units
-from .base import Segment, Translation, TranslationContext, TranslationProvider
+from ..languages import normalize_language
+from .base import Segment, Translation, TranslationContext, TranslationProvider, UNTRUSTED_DOCUMENT_INSTRUCTION
 
 
 class QwenMTProvider(TranslationProvider):
@@ -68,6 +69,7 @@ class QwenMTProvider(TranslationProvider):
     def _language_code(language: str) -> str:
         """把 PaperLocale 语言标签转为 Qwen-MT 接口使用的代码。"""
 
+        language = normalize_language(language)
         aliases = {"zh-CN": "zh", "zh-TW": "zh_tw"}
         return aliases.get(language, language.split("-", 1)[0].lower())
 
@@ -195,7 +197,9 @@ class QwenMTProvider(TranslationProvider):
                     "target_lang": self._language_code(context.target_language),
                     # 领域说明来自当前 DomainPack，Provider 不再内置任何
                     # 学科、论文或目标语言特例。
-                    "domains": context.domain.prompt,
+                    "domains": (UNTRUSTED_DOCUMENT_INSTRUCTION
+                                + " Return only translated text in message.content; do not add output wrappers or commentary.\n"
+                                + context.domain.prompt),
                     "terms": [
                         {"source": source, "target": target}
                         for source, target in terms_by_source.items()
@@ -220,7 +224,7 @@ class QwenMTProvider(TranslationProvider):
             # 标记完整也可能被模型粘到额外数字上，如 20[year] -> 202015。
             # 对还原后的整段运行同一门禁，不能仅凭标记个数就接受候选。
             needs_repair = not valid_markers or bool(
-                validate_translation(segment.source, restored_target, domain)
+                validate_translation(segment.source, restored_target, domain, source_language=context.source_language, target_language=context.target_language)
             )
             if needs_repair:
                 # 已实测专用模型会删去重复 SST 的某次标记。仅做一次确定性分段：
@@ -248,7 +252,7 @@ class QwenMTProvider(TranslationProvider):
                         translated_part = self._request_translation(fragment_body)
                         if re.search(returned_marker_pattern, translated_part):
                             raise ValueError("Qwen-MT 分段译文包含意外保护标记")
-                        fragment_errors = validate_translation(part, translated_part, None)
+                        fragment_errors = validate_translation(part, translated_part, None, source_language=context.source_language, target_language=context.target_language)
                         if fragment_errors:
                             raise ValueError(f"Qwen-MT 分段译文未通过门禁：{fragment_errors}")
                         repaired.append(" " + translated_part.strip() + " ")

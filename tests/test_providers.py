@@ -147,10 +147,7 @@ class ProviderTest(unittest.TestCase):
             )
             self.assertEqual(body["translation_options"]["source_lang"], "en")
             self.assertEqual(body["translation_options"]["target_lang"], "zh")
-            self.assertEqual(
-                body["translation_options"]["domains"],
-                self.context.domain.prompt,
-            )
+            self.assertIn(self.context.domain.prompt, body["translation_options"]["domains"])
             self.assertIn(
                 {"source": "soil moisture", "target": "土壤湿度"},
                 body["translation_options"]["terms"],

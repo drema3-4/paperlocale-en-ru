@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from .languages import normalize_language
+
 
 @dataclass(frozen=True)
 class GlossaryEntry:
@@ -99,8 +101,8 @@ def _read_pack(root: Path) -> DomainPack:
     return DomainPack(
         pack_id=str(manifest["id"]),
         version=str(manifest["version"]),
-        source_language=str(manifest["source_language"]),
-        target_language=str(manifest["target_language"]),
+        source_language=normalize_language(manifest["source_language"]),
+        target_language=normalize_language(manifest["target_language"]),
         content_sha256=digest.hexdigest(),
         prompt=prompt,
         glossary=tuple(glossary),

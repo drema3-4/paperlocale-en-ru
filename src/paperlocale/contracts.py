@@ -14,6 +14,7 @@ from collections import Counter
 from pathlib import Path
 
 from .domains import DomainPack
+from .languages import language_identity, normalize_language, target_text_errors
 from .quantities import find_quantities, hide_spans, standalone_units
 
 FORMULA_RE = re.compile(r"\{v\d+\}")
@@ -126,8 +127,6 @@ UNIT_RE = re.compile(
     r"(?<![^\W\d_\u3400-\u9fff])(?:%|°[CF]?|mm|cm|m|km|Pa|hPa|K|W\s*m-?2|"
     r"g\s*C\s*m-?2(?:\s*d-?1)?|µmol\s*m-?2\s*s-?1)(?![^\W\d_\u3400-\u9fff])",
 )
-CJK_RE = re.compile(r"[\u3400-\u9fff]")
-ENGLISH_RE = re.compile(r"[A-Za-z]")
 TRAILING_PUNCTUATION = ".,;:!?。，、；：！？"
 
 
@@ -268,8 +267,20 @@ def validate_translation(
     domain: DomainPack | None = None,
     *,
     require_cjk: bool = True,
+    source_language: str | None = None,
+    target_language: str | None = None,
 ) -> list[str]:
     """返回全部合同错误；空列表才允许译文进入渲染阶段。"""
+
+    source_lang = normalize_language(source_language if source_language is not None else
+                                     domain.source_language if domain else "en")
+    target_lang = normalize_language(target_language if target_language is not None else
+                                     domain.target_language if domain else "zh-CN")
+    if domain is not None:
+        actual = (source_lang, target_lang)
+        expected = (domain.source_language, domain.target_language)
+        if tuple(map(language_identity, actual)) != tuple(map(language_identity, expected)):
+            raise ValueError(f"Domain-pack language mismatch: validation={actual}, domain={expected}")
 
     errors: list[str] = []
     if not target.strip():
@@ -333,9 +344,17 @@ def validate_translation(
     bare_target = [m.group() for m in _VALIDATION_URL_RE.finditer(target) if m.group().lower().startswith("www.")]
     if _clean_identifiers(bare_source) != _clean_identifiers(bare_target):
         errors.append("url 网址标记不一致")
-    prose = _VALIDATION_URL_RE.sub("", source)
-    if require_cjk and len(ENGLISH_RE.findall(prose)) >= 40 and not CJK_RE.search(target):
-        errors.append("长正文片段缺少中文译文")
+    # Legacy require_cjk=False disables only the heuristic, never hard checks.
+    if require_cjk:
+        prose = _VALIDATION_URL_RE.sub("", source)
+        target_prose = target
+        if normalize_language(target_lang).split("-", 1)[0] != "zh":
+            # Exempt protected data only from language evidence, not validation.
+            for pattern in (_VALIDATION_URL_RE, DOI_RE, FORMULA_RE, STYLE_RE):
+                prose = pattern.sub(" ", prose)
+                target_prose = pattern.sub(" ", target_prose)
+        errors.extend(target_text_errors(prose, target_prose,
+                                        source_language=source_lang, target_language=target_lang))
 
     if domain is not None:
         target_folded = target.casefold()
@@ -421,7 +440,9 @@ def validate_translation_files(
         elif sid in reference_segment_ids and reference_policy == "preserve":
             errors = [] if target == source else ["preserve 策略要求参考文献原样保留"]
         elif sid in reference_segment_ids:
-            errors = validate_translation(source, target, None)
+            errors = validate_translation(source, target, None,
+                                          source_language=domain.source_language if domain else "en",
+                                          target_language=domain.target_language if domain else "zh-CN")
         else:
             errors = validate_translation(source, target, domain)
         if errors:

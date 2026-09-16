@@ -27,7 +27,7 @@ PaperLocale is under active development. The first release focuses on one strict
 4. rebuild the PDF without changing its page geometry;
 5. render every page and produce a reviewable QA report.
 
-The project does not promise bitwise-identical typography. Chinese text naturally changes line breaks. Its promise is narrower and testable: preserve the page structure and protected scientific content, and fail before rendering when that contract is broken.
+The project does not promise bitwise-identical typography. Translated text naturally changes line breaks. Its promise is narrower and testable: preserve the page structure and protected scientific content, and fail before rendering when that contract is broken.
 
 ## Implemented providers and gates
 
@@ -41,11 +41,35 @@ The project does not promise bitwise-identical typography. Chinese text naturall
 - a resumable `collect -> translate -> validate -> render -> qa -> accept` workflow;
 - page geometry, image-object, vector-drawing, blank-page, placeholder, and all-page visual checks.
 
-PaperLocale never reads or copies Codex authentication files. ChatGPT-managed Codex access is for trusted local use only and is not exposed as a public translation API.
+PaperLocale itself never reads or copies Codex authentication files. Read-only
+sandboxing does not guarantee that the Codex agent cannot read unrelated local
+files; see the [trust boundary](SECURITY.md#trust-boundary). ChatGPT-managed Codex access is for trusted local use only and is not exposed as a public translation API.
 
 ## Domain packs
 
 The built-in packs are `atmospheric-science` and `ecology`. Each pack contains a manifest, glossary, prompt rules, and evaluation cases. New disciplines can be added without changing the translation pipeline.
+
+The core verifies English → Chinese (`zh-CN`) and English → Russian (`ru` or
+`ru-RU`). The built-in packs remain EN→ZH; Russian requires an EN→RU domain
+pack with a Russian prompt, glossary and evaluation cases. For example:
+
+```bash
+paperlocale run paper.pdf --run-dir runs/paper-ru \
+  --provider openai-compatible --base-url https://api.example.com/v1 \
+  --model your-model --domain /path/to/en-ru-pack --target-language ru
+```
+
+Language tags are normalized for case and underscores; `ru` and `ru-RU` share
+validation and run-language identity. Pack content hashes remain byte-exact.
+The language heuristic is separate from hard protected-content invariants:
+Chinese retains its existing long-text gate; Russian flags clear untranslated
+English prose (including English with a token Cyrillic suffix), while allowing
+formulas, names, short labels and mixed Latin/Russian terminology. It is not a
+semantic-quality score. Other well-formed target tags use a conservative generic
+policy: hard content checks and glossary checks, without a script heuristic.
+Their provider/layout support is not verified. Retain original SI symbols;
+unregistered Russian unit spellings are not silently treated as equivalent.
+Human semantic and all-page visual review remain required.
 
 ```bash
 python -m paperlocale domain-check atmospheric-science
@@ -134,7 +158,7 @@ path under `runs/paper/render_output/`. References remain unchanged under the
 default `preserve` policy, and unsafe split layout objects remain byte-for-byte
 unchanged with an audit record. A "complete candidate PDF" therefore means that
 all pages and collected segments are closed, not that formulas, references, or
-unsafe fragments are forcibly converted to Chinese.
+unsafe fragments are forcibly translated.
 
 Unattended mode does not fabricate human visual acceptance: the final state is
 still `qa_generated`. Provider, content-contract, or machine-QA failures exit
@@ -202,8 +226,8 @@ acceptance. Once translation is complete, a resume command does not need
 `--provider` or API credentials.
 
 If a rejected segment is genuinely non-translatable, such as a pure formula or
-an author-name list, confirm it explicitly instead of adding artificial Chinese
-text or weakening the global CJK gate:
+an author-name list, confirm it explicitly instead of adding artificial target-language
+text or weakening the language gate:
 
 ```bash
 paperlocale confirm-passthrough --run-dir runs/paper \

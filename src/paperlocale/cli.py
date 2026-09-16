@@ -13,6 +13,7 @@ from .chatgpt_web import (
     import_chatgpt_web_responses,
 )
 from .contracts import validate_translation, validate_translation_files
+from .languages import language_identity
 from .domains import load_domain_pack
 from .evaluation import evaluate_provider, write_evaluation_report
 from .pipeline import translate_segment_file
@@ -65,8 +66,8 @@ def _initialize_or_load_run(
     *,
     source_pdf: Path,
     run_dir: Path,
-    source_language: str,
-    target_language: str,
+    source_language: str | None,
+    target_language: str | None,
     pages: str | None,
 ) -> dict[str, object]:
     """新建运行或核对既有运行仍绑定同一源 PDF，禁止误续跑其他论文。"""
@@ -77,12 +78,15 @@ def _initialize_or_load_run(
         manifest = load_manifest(root)
         if Path(str(manifest["source_pdf"])).resolve() != source:
             raise ValueError("--run-dir 已绑定另一份源 PDF；请使用新的运行目录")
+        for key, requested in (("source_language", source_language), ("target_language", target_language)):
+            if requested is not None and language_identity(requested) != language_identity(str(manifest[key])):
+                raise ValueError(f"Run language mismatch: {key}={requested}, recorded={manifest[key]}")
         return manifest
     return initialize_run(
         source_pdf=source,
         run_dir=root,
-        source_language=source_language,
-        target_language=target_language,
+        source_language=source_language or "en",
+        target_language=target_language or "zh-CN",
         pages=pages,
     )
 
@@ -150,8 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="从当前断点推进到完整候选 PDF 和机器 QA")
     run.add_argument("source_pdf", type=Path)
     run.add_argument("--run-dir", type=Path, required=True)
-    run.add_argument("--source-language", default="en")
-    run.add_argument("--target-language", default="zh-CN")
+    run.add_argument("--source-language", help="New run default: en; resume: recorded language")
+    run.add_argument("--target-language", help="New run default: zh-CN; use ru or ru-RU with an EN→RU domain pack")
     run.add_argument("--pages")
     run.add_argument("--domain", default="atmospheric-science")
     for command in (translate, run):

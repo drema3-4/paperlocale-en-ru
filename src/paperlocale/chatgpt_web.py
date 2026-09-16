@@ -140,7 +140,7 @@ ChatGPT Work。不要上传源 PDF；本提示只包含版面引擎已经拆出�
   "batch_id": "{batch_id}",
   "batch_sha256": "{batch_sha256}",
   "translations": [
-    {{"id": "原样回显输入 ID", "target": "中文译文"}}
+    {{"id": "原样回显输入 ID", "target": "目标语言译文"}}
   ]
 }}
 

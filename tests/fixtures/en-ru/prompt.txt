@@ -1,0 +1,1 @@
+Translate scientific English into Russian. Preserve Latin scientific names and software names. Keep SI symbols and scientific identifiers in their original notation.
