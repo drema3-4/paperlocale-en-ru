@@ -22,6 +22,7 @@ import pymupdf as fitz
 from .contracts import read_jsonl, write_jsonl_atomic
 
 REFERENCE_POLICIES = ("preserve", "translate-titles")
+REFERENCE_DETECTION_VERSION = 5
 # 投稿手稿常把章节号和边栏行号并入同一 PDF 文本块，例如
 # ``6 Reference\n353``。只允许标题词前后各一个整数，并坚持 fullmatch，
 # 避免把正文里的 ``see Reference 353`` 或书目内容误判为区域标题。
@@ -29,19 +30,31 @@ REFERENCE_HEADING_RE = re.compile(
     r"^\s*(?:\d+\s+)?REFERENCES?(?:\s+\d+)?\s*$",
     re.IGNORECASE,
 )
-# 参考文献之后可能还有独立的图表章节。只把“章节号 + 简短英文标题”的完整
-# 文本块视为下一个章节边界。四位年份可能出现在书目续行开头，后接纯字母
-# 题名，必须显式排除，避免截断随后整段及跨页书目；其它编号章节规则不变。
+# 参考文献之后可能还有正文章节或字母编号的附录。只把“章节号 + 简短
+# 英文标题”的完整视觉行视为下一个章节边界。四位年份可能出现在书目续行
+# 开头，后接纯字母题名，必须显式排除。PDF 还可能把 ``A Appendix title`` 拆成
+# 同一基线上的两个文本行，因此区域扫描时会对这种相邻行做严格合并判定。
 NUMBERED_SECTION_HEADING_RE = re.compile(
-    r"^\s*(?!\d{4}\s)\d+\s+[A-Za-z][A-Za-z ]{0,80}\s*$",
+    r"^\s*(?:(?!\d{4}\s)\d+|[A-Z])\s+[A-Za-z][A-Za-z ]{0,80}\s*$",
     re.IGNORECASE,
 )
 # 正式期刊通常在书目后使用不带编号的独立小节标题。只匹配整行，
 # 不把参考文献题名中出现的同名词语当成章节边界。
 POST_REFERENCE_HEADING_RE = re.compile(
     r"^(?:Acknowledg(?:e)?ments|Author contributions|Competing interests|"
-    r"Additional information|Data availability|Code availability)$",
+    r"Additional information|Data availability|Code availability|Appendix(?:es)?|"
+    r"(?:NeurIPS\s+)?Paper Checklist)$",
     re.IGNORECASE,
+)
+# 书目首行既可能是 ``Smith, A.``，也可能是 ACL 风格的多个完整姓名。
+# 后一种至少要求两个“首字母大写的多词姓名 + 逗号”，以免把右栏普通正文
+# 中偶然出现的一个人名当成与左栏 References 同时开始的书目。
+INITIALLED_AUTHOR_START_RE = re.compile(
+    r"^(?:\d+[.)]?\s+)?[A-ZÀ-ÖØ-Þ][\w'’ -]+,?\s+[A-Z]\."
+)
+FULL_NAME_AUTHOR_LIST_START_RE = re.compile(
+    r"^(?:(?:[A-ZÀ-ÖØ-Þ][\w'’.-]*)"
+    r"(?:\s+(?:[A-ZÀ-ÖØ-Þ][\w'’.-]*|(?:de|del|van|von|Le))){1,4},\s+){2,}"
 )
 MINIMUM_EXACT_MATCH_CHARACTERS = 80
 MINIMUM_IN_ORDER_EXACT_COVERAGE = 0.99
@@ -114,6 +127,44 @@ def _heading_block_matches(text: str, line_numbers: list[str]) -> bool:
 
     cleaned = _block_without_line_numbers(text, line_numbers)
     return REFERENCE_HEADING_RE.fullmatch(cleaned) is not None
+
+
+def _is_running_margin_line(
+    line: tuple[float, float, float, float, str],
+    *,
+    page_width: float,
+    page_height: float,
+    occurrences: int,
+) -> bool:
+    """识别不属于正文栏的重复页眉、页脚和居中页码。
+
+    不同出版模板的页码基线并不都落在最后 6% 页面内。尤其是 ACL 模板会把
+    居中页码放在约 93% 高度处；若把它算进左栏外接矩形，该矩形会跨过中线并
+    与右栏书目区域产生伪重叠。只有重复边栏或靠近底部、短且居中的纯页码才被
+    排除，避免吞掉填满页面底部的正常书目行。
+    """
+
+    x0, top, x1, bottom, text = line
+    in_top_margin = bottom < page_height * 0.08
+    in_bottom_margin = top > page_height * 0.90
+    repeated_margin = occurrences > 1 and (in_top_margin or in_bottom_margin)
+    centered_page_number = (
+        in_bottom_margin
+        and re.fullmatch(r"(?:\d+|[ivxlcdm]+)", text.strip(), re.IGNORECASE)
+        is not None
+        and x0 <= page_width * 0.55
+        and x1 >= page_width * 0.45
+    )
+    return repeated_margin or centered_page_number
+
+
+def _looks_like_reference_author_start(text: str) -> bool:
+    """返回右栏当前行是否具有保守的书目作者首行结构。"""
+
+    return bool(
+        INITIALLED_AUTHOR_START_RE.match(text)
+        or FULL_NAME_AUTHOR_LIST_START_RE.match(text)
+    )
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -206,17 +257,22 @@ def _reference_geometry(
     heading_page, heading_x0, heading_top, heading_bottom, heading_page_width = headings[0]
     margin_counts = Counter(
         line[4] for index, lines in enumerate(page_text_lines) for line in lines
-        if line[3] < page_sizes[index][1] * 0.08 or line[1] > page_sizes[index][1] * 0.94
+        if line[3] < page_sizes[index][1] * 0.08 or line[1] > page_sizes[index][1] * 0.90
     )
     heading_starts_in_right_column = heading_x0 >= heading_page_width * 0.45
     region_parts: list[str] = []
     selected_lines: dict[tuple[int, int], list[tuple]] = {}
     region_boundary: tuple[int, float] | None = None
+    heading_right_reference_started = False
     for page_index in range(heading_page, len(page_text_lines)):
-        for line in page_text_lines[page_index]:
+        for line_index, line in enumerate(page_text_lines[page_index]):
             width, height = page_sizes[page_index]
-            in_margin = line[3] < height * 0.08 or line[1] > height * 0.94
-            if in_margin and (margin_counts[line[4]] > 1 or line[4].strip().isdigit()):
+            if _is_running_margin_line(
+                line,
+                page_width=width,
+                page_height=height,
+                occurrences=margin_counts[line[4]],
+            ):
                 continue
             if page_index == heading_page and line[1] < heading_bottom:
                 # References 从左栏下半部开始时，右栏顶部已经是后续书目；
@@ -227,15 +283,31 @@ def _reference_geometry(
                     and line[0] >= heading_page_width / 2
                 )
                 if follows_in_right_column:
+                    # 左栏标题可能与右栏第一条书目的作者名单同高，而右栏上方
+                    # 仍是正文。逐行确认书目首行后，保留其同一标题带内的续行；
+                    # 不能只检查右栏整页的第一段正文。
+                    current_line_starts_references = (
+                        line[3] >= heading_top
+                        and _looks_like_reference_author_start(line[4])
+                    )
+                    if current_line_starts_references:
+                        heading_right_reference_started = True
                     # 有些期刊在整页正文之后才开始横跨两栏的书目；右栏上方
                     # 此时是出版商说明的续文。只有右栏首段具备作者-书目开头
                     # 的明确结构才允许回溯到标题上方，不能仅因它位于右栏就保留。
                     right_body = [item for item in page_text_lines[page_index]
                                   if item[0] >= heading_page_width / 2 and len(item[4]) >= 40
-                                  and not (item[3] < height * 0.08 and margin_counts[item[4]] > 1)]
-                    follows_in_right_column = bool(right_body) and bool(re.match(
-                        r"^(?:\d+[.)]?\s+)?[A-ZÀ-ÖØ-Þ][\w'’ -]+,?\s+[A-Z]\.", right_body[0][4]
-                    ))
+                                  and not _is_running_margin_line(
+                                      item,
+                                      page_width=width,
+                                      page_height=height,
+                                      occurrences=margin_counts[item[4]],
+                                  )]
+                    follows_in_right_column = (
+                        heading_right_reference_started
+                        or bool(right_body)
+                        and _looks_like_reference_author_start(right_body[0][4])
+                    )
                     if right_body and not follows_in_right_column:
                         # 同一条书目的作者名单可能在左栏底部断开，右栏从名字缩写
                         # 继续（如左栏末尾 Aguilar, / 右栏 E., Brunet, M.）。
@@ -244,8 +316,12 @@ def _reference_geometry(
                         left_tail = [item for item in page_text_lines[page_index]
                                      if item[2] < heading_page_width / 2
                                      and item[1] >= heading_bottom and len(item[4]) >= 40
-                                     and not (item[1] > height * 0.94
-                                              and margin_counts[item[4]] > 1)]
+                                     and not _is_running_margin_line(
+                                         item,
+                                         page_width=width,
+                                         page_height=height,
+                                         occurrences=margin_counts[item[4]],
+                                     )]
                         follows_in_right_column = bool(left_tail) and bool(
                             re.search(r"[A-ZÀ-ÖØ-Þ][\w'’ -]+,\s+[A-Z]\.", left_tail[-1][4])
                             and left_tail[-1][4].rstrip().endswith(",")
@@ -274,11 +350,31 @@ def _reference_geometry(
                 line[4],
                 [entry[2] for entry in page_line_entries[page_index]],
             )
+            split_appendix_heading = False
+            if re.fullmatch(r"[A-Z]", cleaned):
+                for companion in page_text_lines[page_index][line_index + 1:]:
+                    same_visual_line = (
+                        abs(companion[1] - line[1]) <= 2
+                        and abs(companion[3] - line[3]) <= 2
+                        and companion[0] >= line[2]
+                    )
+                    if same_visual_line:
+                        companion_text = _block_without_line_numbers(
+                            companion[4],
+                            [entry[2] for entry in page_line_entries[page_index]],
+                        )
+                        split_appendix_heading = bool(
+                            NUMBERED_SECTION_HEADING_RE.fullmatch(
+                                f"{cleaned} {companion_text}"
+                            )
+                        )
+                        break
             # 参考文献必须止于下一个编号章节，不能把其后的 Figure 或 Table
             # 章节误标为参考文献。标题自身已经在上方排除，不会触发此边界。
             if (
                 NUMBERED_SECTION_HEADING_RE.fullmatch(cleaned)
                 or POST_REFERENCE_HEADING_RE.fullmatch(cleaned)
+                or split_appendix_heading
             ):
                 region_boundary = (page_index, line[1])
                 break
@@ -494,6 +590,7 @@ def prepare_reference_review(
     write_jsonl_atomic(review_path, review_rows)
     summary: dict[str, object] = {
         "schema_version": 1,
+        "reference_detection_version": REFERENCE_DETECTION_VERSION,
         "created_at": _utc_now(),
         "source_sha256": source_sha256,
         "segments_sha256": _sha256(segments),
@@ -565,6 +662,7 @@ def confirm_reference_review(
     ]
     mapping: dict[str, object] = {
         "schema_version": 1,
+        "reference_detection_version": REFERENCE_DETECTION_VERSION,
         "confirmed_at": _utc_now(),
         "confirmed_by": confirmed_by.strip(),
         "source_sha256": source_sha256,
@@ -588,12 +686,19 @@ def load_reference_map(
     source_sha256: str,
     segments_path: Path,
     map_path: Path,
+    require_current_detection: bool = True,
 ) -> dict[str, object]:
     """读取并核对人工映射仍绑定当前源 PDF 和当前片段文件。"""
 
     if not map_path.is_file():
         raise FileNotFoundError(f"参考文献映射不存在：{map_path}")
     mapping = json.loads(map_path.read_text(encoding="utf-8"))
+    if (
+        require_current_detection
+        and mapping.get("reference_detection_version")
+        != REFERENCE_DETECTION_VERSION
+    ):
+        raise ValueError("参考文献映射由旧版区域算法生成；请重新复核")
     if mapping.get("source_sha256") != source_sha256:
         raise ValueError("参考文献映射不属于当前源 PDF")
     if mapping.get("segments_sha256") != _sha256(segments_path):

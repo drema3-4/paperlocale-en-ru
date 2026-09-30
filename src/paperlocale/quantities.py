@@ -40,6 +40,17 @@ _NUM = rf'(?:{_POWER}|[+−-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+−-]?\d+)?(?:\s*[
 _VALUES = re.compile(rf'(?<![A-Za-z0-9_./])(?P<a>{_NUM})(?:\s*[–—~-]\s*(?P<b>{_NUM}))?')
 _NON_CJK_LETTER = re.compile(r'[^\W\d_\u3400-\u9fff]')
 _BARE = {'m', 'km', 'cm', 'mm', 'kg', 'Pa', 'hPa', 'kPa', 'K', '°C', '°F', '°', '%', 'ppm', 'ppb'}
+# Spelled-out English unit names are ordinary translatable prose when they are
+# not attached to a number. Treating them as immutable standalone markers
+# makes a correct translation such as ``meters, m`` -> ``метрах, m`` fail
+# even though the actual scientific symbol is preserved. Numeric quantities
+# still parse these aliases in ``find_quantities`` and therefore keep their
+# strict value/unit binding.
+_STANDALONE_PROSE_ALIASES = frozenset({
+    'metre', 'metres', 'meter', 'meters',
+    'second', 'seconds', 'hour', 'hours', 'day', 'days', 'year', 'years',
+    'percent',
+})
 
 
 def _unit_at(text: str, start: int):
@@ -134,12 +145,15 @@ def standalone_units(text: str) -> list[tuple[int, int, str]]:
     """识别剩余单位标记；不把day等普通单词或单字母s/d/W当作裸单位。
 
     有乘除/幂的明确单位表达式可独立出现；中文别名与既有裸单位使用同一身份。
-    数值所在范围应由调用方先遮去，避免同时使用独立计数与配对校验。
+    数值所在范围应由调用方先遮去，避免同时使用独立计数与配对校验。英文全拼单位在无数值
+    时属于可翻译普通文本，不作为必须原样保留的科学标记。
     """
     result = []
     end_seen = -1
     for match in _ATOM.finditer(text):
         if match.start() < end_seen or (match.start() and _NON_CJK_LETTER.match(text[match.start() - 1])):
+            continue
+        if re.sub(r'\s+', ' ', match.group().strip()).casefold() in _STANDALONE_PROSE_ALIASES:
             continue
         parsed = _unit_expression(text, match.start())
         if parsed is None:

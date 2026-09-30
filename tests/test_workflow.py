@@ -7,17 +7,18 @@ import json
 import math
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pymupdf as fitz
 import reportlab
 from reportlab.pdfgen import canvas
 
-from paperlocale.contracts import segment_id, write_jsonl_atomic
+from paperlocale.contracts import read_jsonl, segment_id, write_jsonl_atomic
 from paperlocale.domains import load_domain_pack
 from paperlocale.providers import (
     Segment,
@@ -26,8 +27,10 @@ from paperlocale.providers import (
     TranslationProvider,
 )
 from paperlocale.workflow import (
+    _invoke,
     _layout_provenance,
     _normalized_pdf_text,
+    _refresh_unattended_reference_configuration,
     _resolve_pdf2zh,
     accept_run,
     apply_text_repair,
@@ -115,6 +118,142 @@ class _ProvenanceProvider(TranslationProvider):
 
 
 class WorkflowTest(unittest.TestCase):
+    def test_unattended_stale_reference_map_retranslates_only_reclassified_rows(self) -> None:
+        """An algorithm upgrade must retain references but invalidate appendix passthrough."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdf"
+            reference_lines = (
+                "Smith, A. (2020). Scientific observations of anchoring and",
+                "language-model confidence. Journal of Reliable Results, 10, 1-20.",
+            )
+            reference = " ".join(reference_lines)
+            appendix = (
+                "Appendix analysis measures whether distributional shifts reflect "
+                "anchoring rather than general model instability."
+            )
+            document = canvas.Canvas(str(source))
+            document.drawString(40, 760, "References")
+            document.drawString(40, 730, reference_lines[0])
+            document.drawString(40, 715, reference_lines[1])
+            document.drawString(40, 680, "A Validation of Distributional Metrics")
+            document.drawString(40, 650, appendix)
+            document.save()
+
+            run_dir = root / "run"
+            manifest = initialize_run(
+                source_pdf=source,
+                run_dir=run_dir,
+                source_language="en",
+                target_language="zh-CN",
+            )
+            segments = Path(str(manifest["segments_path"]))
+            translations = Path(str(manifest["translations_path"]))
+            rows = [
+                {"id": segment_id(text), "source": text}
+                for text in (reference, appendix)
+            ]
+            write_jsonl_atomic(segments, rows)
+            write_jsonl_atomic(
+                translations,
+                [{**row, "target": row["source"]} for row in rows],
+            )
+            old_map = {
+                "schema_version": 1,
+                "confirmed_by": "paperlocale-unattended",
+                "source_sha256": manifest["source_sha256"],
+                "segments_sha256": hashlib.sha256(segments.read_bytes()).hexdigest(),
+                "reference_segment_ids": [row["id"] for row in rows],
+                "automatic_reference_segment_ids": [row["id"] for row in rows],
+                "excluded_automatic_segment_ids": [],
+            }
+            map_path = run_dir / "reference_map.json"
+            map_path.write_text(json.dumps(old_map), encoding="utf-8")
+            manifest.update(
+                status="rendered",
+                execution_mode="unattended",
+                reference_map=str(map_path.resolve()),
+                reference_map_sha256=hashlib.sha256(map_path.read_bytes()).hexdigest(),
+                reference_segment_count=2,
+                translation_count=2,
+                rendered_sha256="f" * 64,
+                repair_history=[
+                    {
+                        "type": "vector",
+                        "before_sha256": "e" * 64,
+                        "after_sha256": "f" * 64,
+                        "backup_pdf": str(root / "old-backup.pdf"),
+                    }
+                ],
+            )
+            save_manifest(run_dir, manifest)
+
+            refreshed = _refresh_unattended_reference_configuration(
+                run_dir,
+                manifest,
+                unattended=True,
+            )
+
+            self.assertEqual(refreshed["status"], "collected")
+            self.assertEqual(refreshed["reference_segment_count"], 1)
+            remaining = read_jsonl(translations)
+            self.assertEqual([row["id"] for row in remaining], [segment_id(reference)])
+            archived = read_jsonl(
+                run_dir / "reference_detection_reclassifications.jsonl"
+            )
+            self.assertEqual([row["id"] for row in archived], [segment_id(appendix)])
+            self.assertFalse(archived[0]["currently_reference"])
+            self.assertNotIn("repair_history", refreshed)
+            superseded = refreshed["superseded_repair_histories"][-1]
+            self.assertEqual(
+                superseded["reason"],
+                "reference-detection-upgrade-rerender",
+            )
+            self.assertEqual(superseded["previous_rendered_sha256"], "f" * 64)
+            self.assertEqual(superseded["repairs"][0]["type"], "vector")
+
+    def test_invoke_decodes_non_utf8_output_using_system_encoding(self) -> None:
+        """A Windows console-codepage byte must not abort a completed layout run."""
+
+        log_path = MagicMock(spec=Path)
+        log_path.stem = "collect"
+        child_script = (
+            "import sys;"
+            "sys.stdout.buffer.write(bytes.fromhex('e3eef2eee2ee'));"
+            "sys.stderr.buffer.write(b'progress\\x85 done')"
+        )
+        with patch(
+            "paperlocale.subprocess_utils.locale.getpreferredencoding",
+            return_value="cp1251",
+        ):
+            _invoke([sys.executable, "-c", child_script], log_path)
+
+        log_path.write_text.assert_called_once_with(
+            "готово\n--- STDERR ---\nprogress… done",
+            encoding="utf-8",
+        )
+
+    def test_invoke_handles_missing_captured_streams(self) -> None:
+        """Missing mocked streams must not mask the subprocess return code."""
+
+        completed = subprocess.CompletedProcess(
+            args=["layout"],
+            returncode=1,
+            stdout=None,
+            stderr=None,
+        )
+        log_path = MagicMock(spec=Path)
+        log_path.stem = "collect"
+        with patch("paperlocale.workflow.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(RuntimeError, "exit=1"):
+                _invoke(["layout"], log_path)
+
+        log_path.write_text.assert_called_once_with(
+            "\n--- STDERR ---\n",
+            encoding="utf-8",
+        )
+
     def test_text_repair_normalizes_chinese_wraps_without_merging_numbers(self) -> None:
         """汉字间的换行不应阻止标题修复，但英文词和数字分隔不能被吞掉。"""
 

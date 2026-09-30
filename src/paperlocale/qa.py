@@ -14,6 +14,8 @@ import pymupdf as fitz
 from PIL import Image, ImageDraw
 from pypdf import PdfReader
 
+from .subprocess_utils import decode_process_output
+
 PLACEHOLDER_RE = re.compile(r"\{v\d+\}|<style\s+id=|</style>", re.IGNORECASE)
 VECTOR_PAINT_OPERATORS = {
     b"S",
@@ -165,14 +167,13 @@ def _render(
             str(pdf_path),
             str(output_prefix),
         ],
-        text=True,
-        encoding="utf-8",
         capture_output=True,
         check=False,
     )
     if completed.returncode != 0:
+        stderr = decode_process_output(completed.stderr)
         raise RuntimeError(
-            f"pdftoppm 渲染失败，exit={completed.returncode}：{completed.stderr[-2000:]}"
+            f"pdftoppm 渲染失败，exit={completed.returncode}：{stderr[-2000:]}"
         )
     images = sorted(output_dir.glob(f"{prefix}-*.png"))
     if not images:
@@ -387,9 +388,19 @@ def inspect_pdf_pair(
         1,
     ):
         with Image.open(source_image_path) as source_image, Image.open(target_image_path) as target_image:
-            ratio = _nonwhite_ratio(target_image)
-            if ratio < 0.01:
-                errors.append(f"第{index}页疑似空白，非白像素比例={ratio:.4f}")
+            source_ratio = _nonwhite_ratio(source_image)
+            target_ratio = _nonwhite_ratio(target_image)
+            sparse_content_lost = (
+                source_ratio > 0
+                and target_ratio < source_ratio * 0.35
+            )
+            if target_ratio < 0.01 and (
+                source_ratio >= 0.01 or sparse_content_lost
+            ):
+                errors.append(
+                    f"第{index}页疑似空白，非白像素比例="
+                    f"source={source_ratio:.4f}, translated={target_ratio:.4f}"
+                )
             page_record = pages[index - 1] if index <= len(pages) else {}
             source_media = page_record.get("source_media_box")
             page_size = None
@@ -408,7 +419,8 @@ def inspect_pdf_pair(
             comparison_path = comparison_dir / f"page-{index:03d}.png"
             comparison.save(comparison_path)
             if index <= len(pages):
-                pages[index - 1]["translated_nonwhite_ratio"] = round(ratio, 6)
+                pages[index - 1]["source_nonwhite_ratio"] = round(source_ratio, 6)
+                pages[index - 1]["translated_nonwhite_ratio"] = round(target_ratio, 6)
                 pages[index - 1]["comparison"] = str(comparison_path)
 
     report: dict[str, object] = {

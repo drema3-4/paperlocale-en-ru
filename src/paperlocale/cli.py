@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import sys
 from pathlib import Path
 
 from . import __version__
@@ -43,6 +44,19 @@ from .workflow import (
     translate_run,
     validate_run,
 )
+
+
+def _configure_stdio() -> None:
+    """Keep multilingual CLI diagnostics writable on legacy Windows code pages."""
+
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                # Test captures and already-closed streams may reject reconfiguration.
+                pass
 
 
 def _domain_check(identifier: str) -> None:
@@ -428,6 +442,7 @@ def _provider_from_args(args: argparse.Namespace):
 
 
 def main() -> int:
+    _configure_stdio()
     args = build_parser().parse_args()
     if args.command == "domain-check":
         _domain_check(args.domain)
@@ -489,7 +504,7 @@ def main() -> int:
             raise ValueError("运行尚未翻译；请提供 --provider 后重试")
         final_manifest = run_to_qa(
             run_dir=root,
-            provider=_provider_from_args(args) if needs_provider else None,
+            provider=_provider_from_args(args) if args.provider is not None else None,
             domain=load_domain_pack(args.domain),
             pdf2zh_bin=args.pdf2zh_bin,
             dpi=args.dpi,

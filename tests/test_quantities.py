@@ -42,6 +42,31 @@ class QuantityTests(unittest.TestCase):
         self.assertEqual(validate_translation('m/s','米/秒'), [])
         self.assertTrue(validate_translation('m s−1','m'))
 
+    def test_spelled_out_units_are_translatable_but_symbols_remain_protected(self):
+        cases = [
+            ('"r": "Radius of the coin (in meters, m)"',
+             '"r": "Радиус монеты (в метрах, m)"'),
+            ('the table (in meters per second, m/s)"',
+             'стола (в метрах в секунду, m/s)"'),
+            ('the table (in meters per second, m/s)"',
+             'стола (в метрах в секунду, m s^-1)"'),
+        ]
+        for source, target in cases:
+            with self.subTest(source=source, target=target):
+                self.assertEqual(
+                    validate_translation(
+                        source, target, source_language='en', target_language='ru-RU',
+                    ),
+                    [],
+                )
+        self.assertTrue(
+            validate_translation(
+                'Speed (in meters per second, m/s)',
+                'Скорость (в метрах в секунду)',
+                source_language='en', target_language='ru-RU',
+            )
+        )
+
     def test_gpt_prompt_has_joint_constraints_without_changing_key_schema(self):
         context=TranslationContext('en','zh-CN',load_domain_pack('atmospheric-science'))
         prompt,schema=_keyed_request([Segment('original-hash','Measure 500 hPa and 50 km.')],context)

@@ -45,6 +45,113 @@ def reference_pair(root, columns=2, landscape=False):
 
 
 class LayoutRecoveryTest(unittest.TestCase):
+    def test_paper_checklist_ends_reference_region(self):
+        """A conference paper checklist after References remains translatable."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.pdf"
+            with fitz.open() as doc:
+                page = doc.new_page(width=600, height=800)
+                page.insert_text((40, 80), "References", fontsize=10)
+                for row in range(4):
+                    page.insert_text(
+                        (40, 110 + row * 18),
+                        f"Smith, A. (202{row}). Scientific observations and results.",
+                        fontsize=8,
+                    )
+                page = doc.new_page(width=600, height=800)
+                page.insert_text((40, 80), "NeurIPS Paper Checklist", fontsize=12)
+                page.insert_text(
+                    (40, 110),
+                    "Question: Do the main claims match the experimental results?",
+                    fontsize=8,
+                )
+                doc.save(source)
+
+            _pages, text, _numbers, regions = _reference_geometry(source)
+            self.assertIn("Scientific observations", text)
+            self.assertNotIn("NeurIPS Paper Checklist", text)
+            self.assertNotIn("Question: Do the main claims", text)
+            self.assertTrue(regions)
+            self.assertTrue(all(region["page"] == 1 for region in regions))
+
+    def test_centered_footer_page_number_does_not_overlap_reference_columns(self):
+        """较高的居中页码不得把左栏书目矩形扩展到右栏。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, target = root / "source.pdf", root / "target.pdf"
+            with fitz.open() as doc:
+                page = doc.new_page(width=600, height=800)
+                page.insert_text((40, 80), "References", fontsize=10)
+                for row in range(4):
+                    page.insert_text(
+                        (40, 110 + row * 18),
+                        f"Smith, A. (202{row}). Scientific observations in the left column.",
+                        fontsize=8,
+                    )
+                    page.insert_text(
+                        (310, 110 + row * 18),
+                        f"Taylor, B. (202{row}). Scientific observations in the right column.",
+                        fontsize=8,
+                    )
+                # y=750 gives a bbox top around 741 (92.6% of page height), matching
+                # publication templates whose footer sits above the old 94% cutoff.
+                page.insert_text((285, 750), "10590", fontsize=9)
+                page = doc.new_page(width=600, height=800)
+                page.insert_text((40, 80), "Appendix", fontsize=10)
+                doc.save(source)
+            with fitz.open(source) as doc:
+                doc[0].insert_text((40, 114), "OVERLAPPING BAD TRANSLATION", fontsize=12)
+                doc.save(target)
+
+            _pages, text, _numbers, regions = _reference_geometry(source)
+            self.assertNotIn("10590", text)
+            self.assertNotIn("Appendix", text)
+            self.assertEqual(len(regions), 2)
+            left, right = (fitz.Rect(record["rect"]) for record in regions)
+            self.assertFalse(left.intersects(right))
+            preserve_reference_layout(source, target, root / "fixed.pdf")
+
+    def test_split_lettered_appendix_ends_two_column_reference_region(self):
+        """A split ``A Appendix`` heading must not preserve later appendix text."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.pdf"
+            with fitz.open() as doc:
+                page = doc.new_page(width=600, height=800)
+                page.insert_text((40, 80), "References", fontsize=10)
+                for row in range(3):
+                    page.insert_text(
+                        (40, 110 + row * 18),
+                        f"Smith, A. (202{row}). Scientific observations and results.",
+                        fontsize=8,
+                    )
+                    page.insert_text(
+                        (310, 110 + row * 18),
+                        "Appendix discussion remains translated after references.",
+                        fontsize=8,
+                    )
+                page.insert_text((40, 190), "A", fontsize=10)
+                page.insert_text(
+                    (60, 190),
+                    "Validation of Distributional Metrics",
+                    fontsize=10,
+                )
+                page.insert_text(
+                    (40, 215),
+                    "Appendix details must stay outside the reference region.",
+                    fontsize=8,
+                )
+                doc.save(source)
+
+            _pages, text, _numbers, regions = _reference_geometry(source)
+            self.assertIn("Smith", text)
+            self.assertNotIn("Validation of Distributional Metrics", text)
+            self.assertNotIn("Appendix details", text)
+            self.assertTrue(regions)
+            self.assertTrue(all(region["rect"][3] < 190 for region in regions))
+
     def test_author_list_continues_at_right_column_top(self):
         """左栏书目末尾姓氏与右栏顶部名字缩写相接时，恢复整栏且保留正文。"""
         for continuation in [True, False]:
@@ -83,6 +190,60 @@ class LayoutRecoveryTest(unittest.TestCase):
                         self.assertEqual(a[0].get_pixmap(clip=rect).samples, b[0].get_pixmap(clip=rect).samples)
                     self.assertIn("Body discussion", b[0].get_text())
                     self.assertIn(right_top, b[0].get_text())
+
+    def test_full_name_reference_starts_beside_heading_after_right_body(self):
+        """右栏正文结束后，与左栏标题同高的完整姓名作者名单属于书目。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, target = root / "source.pdf", root / "target.pdf"
+            with fitz.open() as doc:
+                page = doc.new_page(width=600, height=800)
+                for row in range(3):
+                    page.insert_text(
+                        (40, 90 + row * 16),
+                        "Left body discussion remains outside the bibliography region.",
+                        fontsize=8,
+                    )
+                    page.insert_text(
+                        (310, 90 + row * 16),
+                        "Right body discussion remains outside the bibliography region.",
+                        fontsize=8,
+                    )
+                page.insert_text((40, 350), "References", fontsize=10)
+                for row in range(3):
+                    page.insert_text(
+                        (40, 380 + row * 16),
+                        f"Smith, A. (202{row}). Scientific observations and results.",
+                        fontsize=8,
+                    )
+                page.insert_text(
+                    (310, 350),
+                    "Chandra Bhagavatula, Ronan Le Bras, Chaitanya Malaviya,",
+                    fontsize=8,
+                )
+                page.insert_text(
+                    (310, 366),
+                    "Keisuke Sakaguchi, Ari Holtzman, and Hannah Rashkin.",
+                    fontsize=8,
+                )
+                page.insert_text(
+                    (310, 382),
+                    "2020. Abductive commonsense reasoning and evaluation.",
+                    fontsize=8,
+                )
+                doc.save(source)
+            with fitz.open(source) as doc:
+                doc[0].insert_text((310, 354), "OVERLAPPING TRANSLATION", fontsize=11)
+                doc.save(target)
+
+            _pages, text, _numbers, regions = _reference_geometry(source)
+            self.assertIn("Chandra Bhagavatula", text)
+            self.assertNotIn("Right body discussion", text)
+            right = [record for record in regions if record["rect"][0] > 300]
+            self.assertEqual(len(right), 1)
+            self.assertLess(right[0]["rect"][1], 350)
+            preserve_reference_layout(source, target, root / "fixed.pdf")
 
     def test_outside_word_rounding_does_not_hide_real_changes(self):
         before = [(144.39498901367188, 638.0874, 153.0791015625, 644.4634, "al.,")]
@@ -317,6 +478,24 @@ class LayoutRecoveryTest(unittest.TestCase):
             replayed = target.get_drawings()[0]
             self.assertEqual(replayed["fill_opacity"], 0)
             self.assertEqual(replayed["stroke_opacity"], 0)
+
+    def test_replayed_background_does_not_cover_translated_text(self):
+        """Восстановленный белый фон должен лежать под уже отрисованным переводом."""
+
+        with fitz.open() as source_document, fitz.open() as target_document:
+            source = source_document.new_page(width=200, height=100)
+            source.draw_rect((0, 0, 200, 100), color=None, fill=(1, 1, 1))
+            target = target_document.new_page(width=200, height=100)
+            target.insert_text((20, 50), "VISIBLE TRANSLATION", fontsize=12)
+            before = target.get_pixmap(colorspace=fitz.csGRAY, alpha=False)
+            before_dark = sum(value < 240 for value in before.samples)
+
+            _replay_vector_drawing(target, source.get_drawings()[0])
+
+            after = target.get_pixmap(colorspace=fitz.csGRAY, alpha=False)
+            after_dark = sum(value < 240 for value in after.samples)
+            self.assertGreater(before_dark, 0)
+            self.assertGreaterEqual(after_dark, before_dark)
 
     def test_more_paths_cannot_hide_changed_original_graphic(self):
         with tempfile.TemporaryDirectory() as tmp:

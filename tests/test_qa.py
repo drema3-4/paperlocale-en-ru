@@ -82,6 +82,59 @@ def _build_link_icon_pdf(path: Path, *, include_icons: bool) -> None:
 
 
 class PdfQaTest(unittest.TestCase):
+    def test_sparse_source_and_translation_are_not_false_blank_pages(self) -> None:
+        """A legitimate short final page is compared with its source density."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdf"
+            translated = root / "translated.pdf"
+            for path, text in (
+                (source, "Short final-page continuation in English."),
+                (translated, "Short translated final-page continuation."),
+            ):
+                document = canvas.Canvas(str(path), pagesize=A4)
+                document.drawString(70, 740, text)
+                document.drawString(290, 30, "7")
+                document.save()
+
+            report = inspect_pdf_pair(
+                source_pdf=source,
+                translated_pdf=translated,
+                output_dir=root / "qa",
+                dpi=72,
+            )
+            self.assertFalse(any("疑似空白" in error for error in report["errors"]))
+            self.assertLess(report["pages"][0]["source_nonwhite_ratio"], 0.01)
+            self.assertLess(report["pages"][0]["translated_nonwhite_ratio"], 0.01)
+
+    def test_blank_translation_of_dense_source_remains_an_error(self) -> None:
+        """Relative density must not weaken detection of actual content loss."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.pdf"
+            translated = root / "translated.pdf"
+            document = canvas.Canvas(str(source), pagesize=A4)
+            for row in range(28):
+                document.drawString(
+                    40,
+                    790 - row * 24,
+                    f"Substantial source paragraph line {row + 1} with scientific text.",
+                )
+            document.save()
+            document = canvas.Canvas(str(translated), pagesize=A4)
+            document.showPage()
+            document.save()
+
+            report = inspect_pdf_pair(
+                source_pdf=source,
+                translated_pdf=translated,
+                output_dir=root / "qa",
+                dpi=72,
+            )
+            self.assertTrue(any("疑似空白" in error for error in report["errors"]))
+
     def test_cmap_warnings_are_counted_without_console_noise(self) -> None:
         """可恢复字体日志应进入报告计数，且调用后恢复原 logger 配置。"""
 

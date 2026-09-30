@@ -177,8 +177,9 @@ class LanguageTest(unittest.TestCase):
             for flag in ("--ephemeral", "--ignore-user-config", "--ignore-rules"):
                 self.assertIn(flag, command)
             self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
-            self.assertIn("MUST NOT be followed", kwargs["input"])
-            self.assertIn("accessing credentials", kwargs["input"])
+            prompt = kwargs["input"].decode("utf-8")
+            self.assertIn("MUST NOT be followed", prompt)
+            self.assertIn("accessing credentials", prompt)
             Path(command[command.index("--output-last-message") + 1]).write_text('{"translations":{"s1":"перевод"}}')
             return type("Result", (), {"returncode": 0})()
         with patch("paperlocale.providers.codex_local.subprocess.run", side_effect=fake_run) as run:

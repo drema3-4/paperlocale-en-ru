@@ -13,6 +13,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
+from ..subprocess_utils import decode_process_output
 from .base import (
     Segment,
     Translation,
@@ -116,13 +117,13 @@ class CodexLocalProvider(TranslationProvider):
 
         completed = subprocess.run(
             [self.codex_bin, "--version"],
-            text=True,
-            encoding="utf-8",
             capture_output=True,
             timeout=30,
             check=False,
         )
-        version = (completed.stdout.strip() or completed.stderr.strip()).splitlines()
+        stdout = decode_process_output(completed.stdout)
+        stderr = decode_process_output(completed.stderr)
+        version = (stdout.strip() or stderr.strip()).splitlines()
         if completed.returncode != 0 or not version:
             raise RuntimeError(
                 f"无法读取 Codex CLI 版本，exit={completed.returncode}"
@@ -178,16 +179,16 @@ class CodexLocalProvider(TranslationProvider):
             command.append("-")
             completed = subprocess.run(
                 command,
-                input=prompt,
-                text=True,
-                encoding="utf-8",
+                input=prompt.encode("utf-8"),
                 capture_output=True,
                 timeout=self.timeout_seconds,
                 check=False,
                 cwd=root,
             )
             if completed.returncode != 0:
-                diagnostic = completed.stderr.strip() or completed.stdout.strip()
+                stderr = decode_process_output(completed.stderr)
+                stdout = decode_process_output(completed.stdout)
+                diagnostic = stderr.strip() or stdout.strip()
                 raise RuntimeError(
                     f"Codex 翻译失败，exit={completed.returncode}：{diagnostic[-2000:]}"
                 )

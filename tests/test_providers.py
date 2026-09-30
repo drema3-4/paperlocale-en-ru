@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -54,9 +55,10 @@ class ProviderTest(unittest.TestCase):
             self.assertIn("gpt-5.6-sol", command)
             self.assertIn("model_reasoning_effort=\"high\"", command)
             self.assertNotIn("auth.json", " ".join(command))
-            self.assertIn("待翻译 JSON", str(kwargs["input"]))
-            self.assertIn('"must_preserve"', str(kwargs["input"]))
-            self.assertIn('"mm": 1', str(kwargs["input"]))
+            prompt = bytes(kwargs["input"]).decode("utf-8")
+            self.assertIn("待翻译 JSON", prompt)
+            self.assertIn('"must_preserve"', prompt)
+            self.assertIn('"mm": 1', prompt)
             return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
         provider = CodexLocalProvider(
@@ -72,19 +74,26 @@ class ProviderTest(unittest.TestCase):
     def test_codex_provenance_records_cli_model_and_effort(self) -> None:
         """运行清单需要足以复核本机会员额度调用的非敏感身份。"""
 
-        completed = type(
-            "Completed",
-            (),
-            {"returncode": 0, "stdout": "codex-cli 0.148.0\n", "stderr": ""},
-        )()
+        completed = subprocess.CompletedProcess(
+            args=["/fake/codex", "--version"],
+            returncode=0,
+            stdout="Тест Codex 0.148.0\n".encode("cp1251"),
+            stderr=b"",
+        )
         provider = CodexLocalProvider(
             codex_bin="/fake/codex",
             model="gpt-5.6-sol",
             reasoning_effort="high",
         )
-        with patch(
-            "paperlocale.providers.codex_local.subprocess.run",
-            return_value=completed,
+        with (
+            patch(
+                "paperlocale.providers.codex_local.subprocess.run",
+                return_value=completed,
+            ) as run,
+            patch(
+                "paperlocale.subprocess_utils.locale.getpreferredencoding",
+                return_value="cp1251",
+            ),
         ):
             self.assertEqual(
                 provider.provenance(),
@@ -92,9 +101,11 @@ class ProviderTest(unittest.TestCase):
                     "provider": "codex-local",
                     "model": "gpt-5.6-sol",
                     "reasoning_effort": "high",
-                    "codex_cli_version": "codex-cli 0.148.0",
+                    "codex_cli_version": "Тест Codex 0.148.0",
                 },
             )
+        self.assertNotIn("text", run.call_args.kwargs)
+        self.assertNotIn("encoding", run.call_args.kwargs)
 
     def test_openai_compatible_provider_keeps_key_out_of_body(self) -> None:
         api_payload = {

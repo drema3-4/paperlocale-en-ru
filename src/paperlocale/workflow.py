@@ -25,7 +25,7 @@ from fontTools import subset as fonttools_subset
 from fontTools.ttLib import TTFont
 
 from . import __version__
-from .contracts import read_jsonl, validate_translation_files
+from .contracts import read_jsonl, validate_translation_files, write_jsonl_atomic
 from .domains import DomainPack
 from .languages import language_identity, normalize_language
 from .passthrough import (
@@ -37,6 +37,7 @@ from .pipeline import translate_segment_file
 from .providers import TranslationProvider
 from .qa import inspect_pdf_pair
 from .references import (
+    REFERENCE_DETECTION_VERSION,
     REFERENCE_POLICIES,
     confirm_reference_review,
     load_reference_map,
@@ -47,6 +48,7 @@ from .segment_safety import (
     load_segment_safety_summary,
     prepare_segment_safety_review,
 )
+from .subprocess_utils import decode_process_output
 
 STATES = (
     "initialized",
@@ -340,6 +342,132 @@ def _load_reference_configuration(
     return selected, map_path
 
 
+def _refresh_unattended_reference_configuration(
+    root: Path,
+    manifest: dict[str, object],
+    *,
+    unattended: bool,
+) -> dict[str, object]:
+    """Recompute stale automatic reference boundaries and invalidate only changed rows."""
+
+    map_path = root / "reference_map.json"
+    if not map_path.is_file():
+        return manifest
+    raw_mapping = json.loads(map_path.read_text(encoding="utf-8"))
+    if raw_mapping.get("reference_detection_version") == REFERENCE_DETECTION_VERSION:
+        return manifest
+    if not unattended or raw_mapping.get("confirmed_by") != UNATTENDED_ACTOR:
+        raise ValueError(
+            "参考文献区域算法已更新；人工确认的映射必须重新复核"
+        )
+
+    recorded_hash = manifest.get("reference_map_sha256")
+    if isinstance(recorded_hash, str) and _sha256(map_path) != recorded_hash:
+        raise ValueError("参考文献映射在翻译后发生变化")
+    segments_path = Path(str(manifest["segments_path"]))
+    old_mapping = load_reference_map(
+        source_sha256=str(manifest["source_sha256"]),
+        segments_path=segments_path,
+        map_path=map_path,
+        require_current_detection=False,
+    )
+    old_ids = {str(sid) for sid in old_mapping["reference_segment_ids"]}
+    old_automatic = {
+        str(sid) for sid in old_mapping["automatic_reference_segment_ids"]
+    }
+    if old_ids != old_automatic or old_mapping["excluded_automatic_segment_ids"]:
+        raise ValueError(
+            "无人值守映射包含手工调整；参考文献算法更新后必须重新复核"
+        )
+
+    new_mapping = confirm_reference_review(
+        source_pdf=Path(str(manifest["source_pdf"])),
+        source_sha256=str(manifest["source_sha256"]),
+        segments_path=segments_path,
+        output_dir=root,
+        additional_segment_ids=[],
+        excluded_automatic_segment_ids=[],
+        confirmed_by=UNATTENDED_ACTOR,
+    )
+    new_ids = {str(sid) for sid in new_mapping["reference_segment_ids"]}
+    changed_ids = old_ids ^ new_ids
+
+    translations_path = Path(str(manifest["translations_path"]))
+    translation_rows = (
+        read_jsonl(translations_path) if translations_path.is_file() else []
+    )
+    removed_rows = [
+        row for row in translation_rows if str(row.get("id", "")) in changed_ids
+    ]
+    if removed_rows:
+        archive_path = root / "reference_detection_reclassifications.jsonl"
+        archive = read_jsonl(archive_path) if archive_path.is_file() else []
+        archived_ids = {str(row.get("id", "")) for row in archive}
+        for row in removed_rows:
+            sid = str(row.get("id", ""))
+            if sid not in archived_ids:
+                archive.append(
+                    {
+                        **row,
+                        "previously_reference": sid in old_ids,
+                        "currently_reference": sid in new_ids,
+                        "reclassified_at": _utc_now(),
+                    }
+                )
+        write_jsonl_atomic(archive_path, archive)
+        write_jsonl_atomic(
+            translations_path,
+            [
+                row
+                for row in translation_rows
+                if str(row.get("id", "")) not in changed_ids
+            ],
+        )
+
+    manifest["reference_map"] = str(map_path.resolve())
+    manifest["reference_map_sha256"] = _sha256(map_path)
+    manifest["reference_segment_count"] = len(new_ids)
+    manifest["unattended_reference_segment_count"] = len(new_ids)
+    manifest["translation_count"] = len(translation_rows) - len(removed_rows)
+    manifest["status"] = "collected"
+    manifest["schema_version"] = SCHEMA_VERSION
+    repair_history = manifest.pop("repair_history", None)
+    if repair_history is not None:
+        if not isinstance(repair_history, list) or any(
+            not isinstance(entry, dict) for entry in repair_history
+        ):
+            raise ValueError("运行清单 repair_history 字段非法")
+        if repair_history:
+            superseded = manifest.setdefault("superseded_repair_histories", [])
+            if not isinstance(superseded, list):
+                raise ValueError("运行清单 superseded_repair_histories 字段非法")
+            superseded.append(
+                {
+                    "superseded_at": _utc_now(),
+                    "reason": "reference-detection-upgrade-rerender",
+                    "previous_rendered_sha256": manifest.get("rendered_sha256"),
+                    "repairs": repair_history,
+                }
+            )
+    for field in (
+        "validated_count",
+        "rendered_pdf",
+        "rendered_sha256",
+        "reference_layout_preserved",
+        "qa_report",
+        "accepted_by",
+        "rejected_translations",
+    ):
+        manifest.pop(field, None)
+    save_manifest(root, manifest)
+    print(
+        "PaperLocale：参考文献区域算法已更新，"
+        f"重新分类 {len(changed_ids)} 个片段并仅重译受影响内容",
+        flush=True,
+    )
+    return manifest
+
+
 def _prepare_unattended_configuration(
     root: Path,
     manifest: dict[str, object],
@@ -605,13 +733,11 @@ def _record_provider_version_transition(
 def _layout_provenance(executable: str) -> dict[str, str]:
     """读取实际 pdf2zh-next 命令版本和同环境 BabelDOC 包版本。"""
 
-    completed: subprocess.CompletedProcess[str] | None = None
+    completed: subprocess.CompletedProcess[bytes] | None = None
     for attempt in range(2):
         try:
             completed = subprocess.run(
                 [executable, "--version"],
-                text=True,
-                encoding="utf-8",
                 capture_output=True,
                 timeout=60,
                 check=False,
@@ -624,7 +750,11 @@ def _layout_provenance(executable: str) -> dict[str, str]:
                 raise RuntimeError("读取 pdf2zh-next 版本连续两次超时") from exc
     if completed is None:  # pragma: no cover - 循环只会成功赋值或抛出异常。
         raise RuntimeError("无法启动 pdf2zh-next 版本探测")
-    combined = completed.stdout + "\n" + completed.stderr
+    combined = (
+        decode_process_output(completed.stdout)
+        + "\n"
+        + decode_process_output(completed.stderr)
+    )
     match = re.search(r"pdf2zh-next version:\s*([^\s]+)", combined)
     if completed.returncode != 0 or match is None:
         raise RuntimeError(
@@ -754,14 +884,14 @@ def _invoke(command: list[str], log_path: Path, timeout_seconds: int = 7200) -> 
     print(f"PaperLocale：开始 {log_path.stem}，阶段日志：{log_path}", file=sys.stderr, flush=True)
     completed = subprocess.run(
         command,
-        text=True,
-        encoding="utf-8",
         capture_output=True,
         timeout=timeout_seconds,
         check=False,
     )
+    stdout = decode_process_output(completed.stdout)
+    stderr = decode_process_output(completed.stderr)
     log_path.write_text(
-        completed.stdout + "\n--- STDERR ---\n" + completed.stderr,
+        stdout + "\n--- STDERR ---\n" + stderr,
         encoding="utf-8",
     )
     if completed.returncode != 0:
@@ -1251,7 +1381,10 @@ def _replay_vector_drawing(
         fill_opacity=float(drawing["fill_opacity"]) if drawing.get("fill_opacity") is not None else 1.0,
         stroke_opacity=float(drawing["stroke_opacity"]) if drawing.get("stroke_opacity") is not None else 1.0,
     )
-    shape.commit(overlay=True)
+    # BabelDOC 会用新文字覆盖源文字，但可能省略代码框、表格底色等源矢量。
+    # 缺失对象必须回放到现有译文内容之下；白色背景若作为 overlay 提交，会
+    # 在数量 QA 已通过的同时遮住整段译文，形成视觉空白页。
+    shape.commit(overlay=False)
 
 
 def restore_source_vectors(
@@ -2015,6 +2148,11 @@ def run_to_qa(
 
     root = run_dir.expanduser().resolve()
     manifest = load_manifest(root)
+    manifest = _refresh_unattended_reference_configuration(
+        root,
+        manifest,
+        unattended=unattended,
+    )
     if manifest["status"] == "initialized":
         collect_run(root, pdf2zh_bin)
         manifest = load_manifest(root)
